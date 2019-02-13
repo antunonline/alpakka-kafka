@@ -22,16 +22,16 @@ import scala.concurrent.duration._
 import scala.collection.JavaConverters._
 
 /**
-  * INTERNAL API
-  */
+ * INTERNAL API
+ */
 @InternalApi
 private[kafka] final class TransactionalProducerStage[K, V, P](
-                                                                val closeTimeout: FiniteDuration,
-                                                                val closeProducerOnStop: Boolean,
-                                                                val producerProvider: () => Producer[K, V],
-                                                                commitInterval: FiniteDuration
-                                                              ) extends GraphStage[FlowShape[Envelope[K, V, P], Future[Results[K, V, P]]]]
-  with ProducerStage[K, V, P, Envelope[K, V, P], Results[K, V, P]] {
+    val closeTimeout: FiniteDuration,
+    val closeProducerOnStop: Boolean,
+    val producerProvider: () => Producer[K, V],
+    commitInterval: FiniteDuration
+) extends GraphStage[FlowShape[Envelope[K, V, P], Future[Results[K, V, P]]]]
+    with ProducerStage[K, V, P, Envelope[K, V, P], Results[K, V, P]] {
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new TransactionalProducerStageLogic(this, producerProvider(), inheritedAttributes, commitInterval)
@@ -55,7 +55,7 @@ private object TransactionalProducerStage {
 
   final class NonemptyTransactionBatch(head: PartitionOffset,
                                        tail: Map[GroupTopicPartition, Long] = Map[GroupTopicPartition, Long]())
-    extends TransactionBatch {
+      extends TransactionBatch {
     private val offsets = tail + (head.key -> head.offset)
 
     def group: String = head.key.groupId
@@ -76,17 +76,17 @@ private object TransactionalProducerStage {
 }
 
 /**
-  * Internal API.
-  *
-  * Transaction (Exactly-Once) Producer State Logic
-  */
+ * Internal API.
+ *
+ * Transaction (Exactly-Once) Producer State Logic
+ */
 private final class TransactionalProducerStageLogic[K, V, P](stage: TransactionalProducerStage[K, V, P],
                                                              producer: Producer[K, V],
                                                              inheritedAttributes: Attributes,
                                                              commitInterval: FiniteDuration)
-  extends DefaultProducerStageLogic[K, V, P, Envelope[K, V, P], Results[K, V, P]](stage,
-    producer,
-    inheritedAttributes)
+    extends DefaultProducerStageLogic[K, V, P, Envelope[K, V, P], Results[K, V, P]](stage,
+                                                                                    producer,
+                                                                                    inheritedAttributes)
     with StageLogging
     with MessageCallback[K, V, P]
     with ProducerCompletionState {
@@ -146,17 +146,20 @@ private final class TransactionalProducerStageLogic[K, V, P](stage: Transactiona
     getAsyncCallback[Envelope[K, V, P]](_.passThrough match {
       case o: ConsumerMessage.PartitionOffset => batchOffsets = batchOffsets.updated(o)
       case PartitionOffsetGroup(partitionOffsets) =>
-        partitionOffsets.foldLeft(Map.empty[Int, (PartitionOffset, Long)]) { (foldMap, v) =>
-          foldMap.get(v.key.partition) match {
-            case Some(value) =>
-              if (value._2 < v.offset)
+        partitionOffsets
+          .foldLeft(Map.empty[Int, (PartitionOffset, Long)]) { (foldMap, v) =>
+            foldMap.get(v.key.partition) match {
+              case Some(value) =>
+                if (value._2 < v.offset)
+                  foldMap.updated(v.key.partition, (v, v.offset))
+                else
+                  foldMap
+              case None =>
                 foldMap.updated(v.key.partition, (v, v.offset))
-              else
-                foldMap
-            case None =>
-              foldMap.updated(v.key.partition, (v, v.offset))
+            }
           }
-        }.values.foreach((rec) => batchOffsets = batchOffsets.updated(rec._1))
+          .values
+          .foreach((rec) => batchOffsets = batchOffsets.updated(rec._1))
       case _ =>
     })
 
