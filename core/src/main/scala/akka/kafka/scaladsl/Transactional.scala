@@ -5,7 +5,7 @@
 
 package akka.kafka.scaladsl
 
-import akka.kafka.ConsumerMessage.TransactionalMessage
+import akka.kafka.ConsumerMessage.{PartitionOffset, PartitionOffsetGroup, TransactionalMessage}
 import akka.kafka.ProducerMessage._
 import akka.kafka.internal.{TransactionalProducerStage, TransactionalSource}
 import akka.kafka.scaladsl.Consumer.Control
@@ -60,6 +60,37 @@ object Transactional {
     val flow = Flow
       .fromGraph(
         new TransactionalProducerStage[K, V, ConsumerMessage.PartitionOffset](
+          txSettings.closeTimeout,
+          closeProducerOnStop = true,
+          () => txSettings.createKafkaProducer(),
+          settings.eosCommitInterval
+        )
+      )
+      .mapAsync(txSettings.parallelism)(identity)
+
+    flowWithDispatcher(txSettings, flow)
+  }
+
+  /**
+   * Publish records to Kafka topics and then continue the flow.  The flow should only used with a [[Transactional.source]] that
+   * emits a [[ConsumerMessage.TransactionalMessage]].  The flow requires a unique `transactional.id` across all app
+   * instances.  The flow will override producer properties to enable Kafka exactly once transactional support.
+   */
+  def multiMessageFlow[K, V](
+      settings: ProducerSettings[K, V],
+      transactionalId: String
+  ): Flow[Envelope[K, V, PartitionOffsetGroup], Results[K, V, PartitionOffsetGroup], NotUsed] = {
+    require(transactionalId != null && transactionalId.length > 0, "You must define a Transactional id.")
+
+    val txSettings = settings.withProperties(
+      ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG -> true.toString,
+      ProducerConfig.TRANSACTIONAL_ID_CONFIG -> transactionalId,
+      ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION -> 1.toString
+    )
+
+    val flow = Flow
+      .fromGraph(
+        new TransactionalProducerStage[K, V, PartitionOffsetGroup](
           txSettings.closeTimeout,
           closeProducerOnStop = true,
           () => txSettings.createKafkaProducer(),

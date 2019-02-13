@@ -83,6 +83,8 @@ object ConsumerMessage {
       PartitionOffsetMetadata(key, offset, metadata)
   }
 
+  final case class PartitionOffsetGroup(offsets: Seq[PartitionOffset])
+
   /**
    * Offset position and metadata for a groupId, topic, partition.
    */

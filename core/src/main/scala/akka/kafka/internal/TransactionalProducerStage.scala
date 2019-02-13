@@ -4,9 +4,10 @@
  */
 
 package akka.kafka.internal
+
 import akka.annotation.InternalApi
 import akka.kafka.ConsumerMessage
-import akka.kafka.ConsumerMessage.{GroupTopicPartition, PartitionOffset}
+import akka.kafka.ConsumerMessage.{GroupTopicPartition, PartitionOffset, PartitionOffsetGroup}
 import akka.kafka.ProducerMessage.{Envelope, Results}
 import akka.kafka.internal.ProducerStage.{MessageCallback, ProducerCompletionState}
 import akka.stream.{Attributes, FlowShape}
@@ -21,16 +22,16 @@ import scala.concurrent.duration._
 import scala.collection.JavaConverters._
 
 /**
- * INTERNAL API
- */
+  * INTERNAL API
+  */
 @InternalApi
 private[kafka] final class TransactionalProducerStage[K, V, P](
-    val closeTimeout: FiniteDuration,
-    val closeProducerOnStop: Boolean,
-    val producerProvider: () => Producer[K, V],
-    commitInterval: FiniteDuration
-) extends GraphStage[FlowShape[Envelope[K, V, P], Future[Results[K, V, P]]]]
-    with ProducerStage[K, V, P, Envelope[K, V, P], Results[K, V, P]] {
+                                                                val closeTimeout: FiniteDuration,
+                                                                val closeProducerOnStop: Boolean,
+                                                                val producerProvider: () => Producer[K, V],
+                                                                commitInterval: FiniteDuration
+                                                              ) extends GraphStage[FlowShape[Envelope[K, V, P], Future[Results[K, V, P]]]]
+  with ProducerStage[K, V, P, Envelope[K, V, P], Results[K, V, P]] {
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new TransactionalProducerStageLogic(this, producerProvider(), inheritedAttributes, commitInterval)
@@ -38,6 +39,7 @@ private[kafka] final class TransactionalProducerStage[K, V, P](
 
 /** Internal API */
 private object TransactionalProducerStage {
+
   object TransactionBatch {
     def empty: TransactionBatch = new EmptyTransactionBatch()
   }
@@ -53,10 +55,11 @@ private object TransactionalProducerStage {
 
   final class NonemptyTransactionBatch(head: PartitionOffset,
                                        tail: Map[GroupTopicPartition, Long] = Map[GroupTopicPartition, Long]())
-      extends TransactionBatch {
+    extends TransactionBatch {
     private val offsets = tail + (head.key -> head.offset)
 
     def group: String = head.key.groupId
+
     def offsetMap(): Map[TopicPartition, OffsetAndMetadata] = offsets.map {
       case (gtp, offset) => new TopicPartition(gtp.topic, gtp.partition) -> new OffsetAndMetadata(offset + 1)
     }
@@ -73,17 +76,17 @@ private object TransactionalProducerStage {
 }
 
 /**
- * Internal API.
- *
- * Transaction (Exactly-Once) Producer State Logic
- */
+  * Internal API.
+  *
+  * Transaction (Exactly-Once) Producer State Logic
+  */
 private final class TransactionalProducerStageLogic[K, V, P](stage: TransactionalProducerStage[K, V, P],
                                                              producer: Producer[K, V],
                                                              inheritedAttributes: Attributes,
                                                              commitInterval: FiniteDuration)
-    extends DefaultProducerStageLogic[K, V, P, Envelope[K, V, P], Results[K, V, P]](stage,
-                                                                                    producer,
-                                                                                    inheritedAttributes)
+  extends DefaultProducerStageLogic[K, V, P, Envelope[K, V, P], Results[K, V, P]](stage,
+    producer,
+    inheritedAttributes)
     with StageLogging
     with MessageCallback[K, V, P]
     with ProducerCompletionState {
@@ -142,6 +145,18 @@ private final class TransactionalProducerStageLogic[K, V, P](stage: Transactiona
   override val onMessageAckCb: AsyncCallback[Envelope[K, V, P]] =
     getAsyncCallback[Envelope[K, V, P]](_.passThrough match {
       case o: ConsumerMessage.PartitionOffset => batchOffsets = batchOffsets.updated(o)
+      case PartitionOffsetGroup(partitionOffsets) =>
+        partitionOffsets.foldLeft(Map.empty[Int, (PartitionOffset, Long)]) { (foldMap, v) =>
+          foldMap.get(v.key.partition) match {
+            case Some(value) =>
+              if (value._2 < v.offset)
+                foldMap.updated(v.key.partition, (v, v.offset))
+              else
+                foldMap
+            case None =>
+              foldMap.updated(v.key.partition, (v, v.offset))
+          }
+        }.values.foreach((rec) => batchOffsets = batchOffsets.updated(rec._1))
       case _ =>
     })
 

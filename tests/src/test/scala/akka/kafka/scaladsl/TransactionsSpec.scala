@@ -5,7 +5,7 @@
 
 package akka.kafka.scaladsl
 
-import akka.kafka.ConsumerMessage.PartitionOffset
+import akka.kafka.ConsumerMessage.{PartitionOffset, PartitionOffsetGroup}
 import akka.kafka.Subscriptions.TopicSubscription
 import akka.kafka._
 import akka.kafka.scaladsl.Consumer.Control
@@ -23,10 +23,10 @@ class TransactionsSpec extends SpecBase(kafkaPort = KafkaPorts.TransactionsSpec)
 
   def createKafkaConfig: EmbeddedKafkaConfig =
     EmbeddedKafkaConfig(kafkaPort,
-                        zooKeeperPort,
-                        Map(
-                          "offsets.topic.replication.factor" -> "1"
-                        ))
+      zooKeeperPort,
+      Map(
+        "offsets.topic.replication.factor" -> "1"
+      ))
 
   "A consume-transform-produce cycle" must {
 
@@ -67,6 +67,53 @@ class TransactionsSpec extends SpecBase(kafkaPort = KafkaPorts.TransactionsSpec)
         probeConsumer
           .request(100)
           .expectNextN((1 to 100).map(_.toString))
+
+        probeConsumer.cancel()
+        Await.result(control.shutdown(), remainingOrDefault)
+      }
+    }
+
+    "complete multiMessage" in {
+      assertAllStagesStopped {
+        val sourceTopic = createTopicName(1)
+        val sinkTopic = createTopicName(2)
+        val group = createGroupId(1)
+
+        givenInitializedTopic(sourceTopic)
+        givenInitializedTopic(sinkTopic)
+
+        Await.result(produce(sourceTopic, 1 to 100), remainingOrDefault)
+
+        val consumerSettings = consumerDefaults.withGroupId(group)
+
+        val control = Transactional
+          .source(consumerSettings, TopicSubscription(Set(sourceTopic), None))
+          .filterNot(_.record.value() == InitialMsg)
+          .grouped(100)
+          .map { records =>
+            records.foldRight((Vector.empty[ProducerRecord[String, String]], Vector.empty[PartitionOffset])) { (record, t) =>
+              (t._1 :+ new ProducerRecord(sinkTopic, record.record.key(), record.record.value()), t._2 :+ record.partitionOffset)
+            }
+          }
+          .map { msg => ProducerMessage.multi(msg._1, PartitionOffsetGroup(msg._2)) }
+          .via(Transactional.multiMessageFlow(producerDefaults, group))
+          .toMat(Sink.ignore)(Keep.left)
+          .run()
+
+        val probeConsumerGroup = createGroupId(2)
+        val probeConsumerSettings = consumerDefaults
+          .withGroupId(probeConsumerGroup)
+          .withProperties(ConsumerConfig.ISOLATION_LEVEL_CONFIG -> "read_committed")
+
+        val probeConsumer = Consumer
+          .plainSource(probeConsumerSettings, TopicSubscription(Set(sinkTopic), None))
+          .filterNot(_.value == InitialMsg)
+          .map(_.value())
+          .runWith(TestSink.probe)
+
+        probeConsumer
+          .request(100)
+          .expectNextN((100 to 1).map(_.toString))
 
         probeConsumer.cancel()
         Await.result(control.shutdown(), remainingOrDefault)
@@ -153,7 +200,7 @@ class TransactionsSpec extends SpecBase(kafkaPort = KafkaPorts.TransactionsSpec)
                 throw new RuntimeException("Uh oh.. intentional exception")
               } else {
                 ProducerMessage.single(new ProducerRecord(sinkTopic, msg.record.key, msg.record.value),
-                                       msg.partitionOffset)
+                  msg.partitionOffset)
               }
             }
             // side effect out the `Control` materialized value because it can't be propagated through the `RestartSource`
@@ -217,7 +264,7 @@ class TransactionsSpec extends SpecBase(kafkaPort = KafkaPorts.TransactionsSpec)
               throw new RuntimeException("Uh oh..")
             } else {
               ProducerMessage.Message(new ProducerRecord(sinkTopic, msg.record.key, msg.record.value),
-                                      msg.partitionOffset)
+                msg.partitionOffset)
             }
           }
           .map { msg =>
